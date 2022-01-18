@@ -1,0 +1,228 @@
+/*
+ ntr.c -- Nicolet to Rhythm format conversion
+     Single channel only
+     Adapted from btr1.c
+
+ copyright James C. Miller and TSRI 1995
+ 
+ Ver. 1.0 begun 7/11/95 - all Nic vs. Bio changes in, except Nic. offset
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <io.h>
+#include "mathlib.h"
+
+FILE *input_file, *output_file;
+char input_name[15], output_name[15];
+char *p, dum[9];
+int num_bin_channels, which_chan;
+long file_len, sam_len, num_samp, blk_siz, num_blk;
+
+/* for output file:                                         */
+struct header
+{
+     char patient_name[18];
+     char patient_id[12];
+     char comments[30];
+     char montage_code[2];
+     char date[12];                /* mmm dd, yyyy               */
+     char time [11];               /* hh:mm:ss.t                 */
+     char program_name[8];
+     char path_name[55];
+     char montage_file_name[9];
+     char padd1[43];
+     int dig_freq_hi;
+     int dig_freq_lo;
+     long duration;
+     char padd2[20];
+     int ticks;
+     int channels;
+     int blocks;
+     char format[13];
+     char version[7];
+     char corrected_flag[1];
+     char reformatted_flag[1];
+     char headers_2_3[512];
+};
+struct header hdr;
+
+main ( int argc, char *argv[] )
+{
+     /* Command line check */
+     if ( argc < 2 )
+     {
+          printf ( "\n  *** Need input file name *** \n");
+          exit(0);
+     }
+     else if ( argc > 2 )
+     {
+          printf ( "\n  *** Supply just one file name *** \n" );
+          exit(0);
+     }
+
+     Screen_Title ();
+
+     strcpy ( input_name, argv[1] );
+     Find_Input_File ();
+     
+     Get_Output_File ();
+     /* Get_Nic_Header_Binary (); */
+     Get_Data_Binary ();
+     
+     fcloseall();
+}
+
+void Screen_Title ()
+{
+     setvmode ( 2 );
+     printf ( "\n          NicToRhy          Copyright TSRI 1995          Version 1.0\n" );
+     printf ( "          Single channel translation from Nicolet UltraSom to Rhythm 8.0 \n\n" );
+}
+
+void Find_Input_File ()
+{
+     input_file = fopen ( input_name, "rb");
+     if ( input_file == NULL )
+     {     
+          printf ( "  *** Can't find %s *** \n", input_name );
+          exit(0);
+     }
+     else
+          printf ( "The input file is %s \n\n", input_name );
+          
+}
+
+void Get_Output_File ()
+{
+     printf ( "Output file name (up to 8 char., *.eeg assumed): " );
+     scanf ( "%s", dum );
+     strcpy ( output_name, dum );
+     strcat ( output_name, ".eeg" );
+     output_file = fopen ( output_name, "w+b");
+     printf ( "     The output file is %s \n\n", output_name );
+}
+
+Get_Nic_Header_Binary ()
+{
+     int ii;
+     char buffer[30];
+     
+     fseek ( input_file, 24L, SEEK_SET );
+     fread ( buffer, sizeof ( char ), 11, input_file );
+     printf ( "Sleep date was %s \n", buffer );
+     strcpy ( hdr.date, " " );
+     strncat ( hdr.date, buffer, 11 );
+     fread ( buffer, sizeof ( char ), 26, input_file );
+     printf ( "Patient's name was %s \n", buffer );
+     strcpy ( hdr.patient_name, buffer, 17 );
+     
+     fseek ( input_file, 368L, SEEK_SET );
+     num_bin_channels = fgetc ( input_file );
+     strcpy ( hdr.comments, "Data from Bio-logic" );
+     strcpy ( hdr.montage_code, "mc" );
+     strcpy ( hdr.program_name, "OXFORD" );       /* BioLogic ??? */
+     strcpy ( hdr.montage_file_name, "DEFAULT" );
+     hdr.channels = 2;
+     hdr.dig_freq_lo = 128;
+     hdr.dig_freq_hi = 128;
+     strcpy ( hdr.corrected_flag, "-" );
+     strcpy ( hdr.reformatted_flag, "-" );
+     for ( ii = 0; ii < 512; ii++ )
+          strcpy ( hdr.headers_2_3[ii], "" );
+     
+     /* write the header */
+     printf ( "Writing Rhythm header \n\n" );
+     fwrite ( &hdr, sizeof ( hdr ), 1, output_file );
+
+     /* select the channel to translate */
+     strcpy ( buffer, "Which channel desired (1-" );
+     strcat ( buffer, itoa ( num_bin_channels, 2, 10 ));
+     strcat ( buffer, ")? " );
+     printf ( buffer );
+     scanf ( "%d", &which_chan );
+     printf ( "     Channel is no. %d \n", which_chan );
+     
+     /*        *** need a test here for Express files ***             */
+     /*             ext. header at 7424 v. data at 7296?              */
+     /*             look for EZC at 7424.                             */
+     
+     /* calculate number of samples */
+     file_len = filelength ( fileno ( input_file ));
+     printf ( "File length = %ld bytes \n", file_len );
+     sam_len = file_len - 7296L;                  /* non-Express, only */
+     blk_siz = num_bin_channels * 3000L;
+     num_samp = sam_len / num_bin_channels;
+     num_blk = sam_len / blk_siz;
+     printf ( "Number of blocks = %ld \n\n", num_blk );
+}
+
+Get_Data_Binary ()
+{     
+     int D[2], nic_dat[3060], rhy_dat[5760];
+     int offset8 = 128, offset12 = 2048, mult = 16;
+     int ii, jj, kk, place_in, place_out, block_part, order;
+     float done;
+     Real_Vector yin, yout, xin, xout;
+     int nyin = 18, nyout = 32;         /* 17 is smallest integer segment */
+                                   /* 18 used to capture range up to 1.0 */
+
+     yin = valloc ( NULL, nyin );
+     yout = valloc ( NULL, nyout );
+     xin = valloc ( NULL, nyin );
+     xout = valloc ( NULL, nyout );
+     for ( ii = 0; ii < nyin; ii++ )
+          xin[ii] = 1.0 * ii / ( nyin - 1 );
+     for ( ii = 0; ii < nyout; ii++ )
+          xout[ii] = 1.0 * ii / nyout;
+     
+     /* dummy second channel for Rhythm */
+     D[1] = 2048;
+     D[1] = D[1] & 0x0FFF;
+     
+     /* go to start of Nicolet data -- XXX change offset */
+     fseek ( input_file, 7296L + which_chan - 1, SEEK_SET );
+
+     /* go to start point for Rhythm data -- need this ??? */
+     fseek ( output_file, 768L, SEEK_SET );
+     
+     /* buffer the i/o */
+     for ( jj = 0; jj < num_blk; jj++ )
+     {
+          /* get block of Nicolet data */
+          for ( ii = 0; ii < 3060; ii++ )
+          {     
+               nic_dat[ii] = fgetc ( input_file );
+               fseek ( input_file, num_bin_channels - 1, SEEK_CUR );
+          }
+          
+          /* 9th order LaGrange interpolation */
+          block_part = 3060 / ( nyin - 1 );       /* corrects to 17 */
+          order = 9;
+          for ( ii = 0; ii < block_part; ii++ )
+          {
+               place_in = ii * ( nyin - 1 );
+               place_out = ii * nyout;
+               
+               for ( kk = 0; kk < nyin; kk++ )
+                    yin[kk] = nic_dat[place_in + kk];
+
+               for ( kk = 0; kk < nyout; kk++ )
+                    yout[kk] = interp1 ( xout[kk], xin, yin, nyin, order );
+               
+               for ( kk = 0; kk < nyout; kk++ )
+                    rhy_dat[kk + place_out] = yout[kk];
+          }
+          
+          /* write block of Rhythm data */
+          for ( ii = 0; ii < 5760; ii++ )
+          {     
+               D[0] = (( rhy_dat[ii] - offset8 ) * mult ) + offset12;
+               D[0] = D[0] & 0x0FFF;
+               fwrite ( D, sizeof ( int ), 2, output_file );
+          }
+          done = jj + 1;
+          poscurs ( 18, 0 );
+          printf ( "%3.2f%% completed", 100.0 * done / num_blk );
+     }
+}
